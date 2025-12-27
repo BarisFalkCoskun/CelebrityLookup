@@ -10,8 +10,15 @@ struct CameraLiveView: View {
     @State private var lastRecognitionTime: Date = .distantPast
     @State private var isProcessing = false
     @State private var capturedImage: UIImage?
+    @State private var serverMatches: [FastRecognitionMatch] = []
 
-    let recognitionInterval: TimeInterval = 1.5  // Seconds between server calls
+    // Detail sheet state
+    @State private var selectedCelebrity: FastRecognitionMatch?
+    @State private var celebrityDetails: CelebrityDetails?
+    @State private var showingDetails = false
+    @State private var isLoadingDetails = false
+
+    let recognitionInterval: TimeInterval = 1.0  // Seconds between server calls
 
     init(appState: Binding<AppState>) {
         self._appState = appState
@@ -20,8 +27,8 @@ struct CameraLiveView: View {
     var body: some View {
         GeometryReader { geometry in
             ZStack {
-                // Camera preview
-                CameraPreviewView(session: cameraManager.session)
+                // Camera preview - using custom UIView for reliable sizing
+                CameraPreviewRepresentable(session: cameraManager.session)
                     .ignoresSafeArea()
 
                 // Face overlay
@@ -63,14 +70,21 @@ struct CameraLiveView: View {
                     Spacer()
 
                     // Bottom instruction
-                    Text("Point at a celebrity to identify them")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 10)
-                        .background(.ultraThinMaterial)
-                        .cornerRadius(20)
-                        .padding(.bottom, 40)
+                    VStack(spacing: 8) {
+                        if !serverMatches.isEmpty {
+                            Text("\(serverMatches.count) celebrity detected")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                        }
+                        Text("Point at a celebrity to identify them")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(20)
+                    .padding(.bottom, 40)
                 }
             }
         }
@@ -87,13 +101,13 @@ struct CameraLiveView: View {
 
     private func handleFrameCapture(image: UIImage, visionFaces: [VNFaceObservation]) {
         capturedImage = image
+        let imageSize = cameraManager.currentFrameSize
 
         // Convert Vision face observations to our DetectedFace model
         var newFaces: [DetectedFace] = []
         for observation in visionFaces {
             // Vision coordinates are normalized (0-1) with origin at bottom-left
             // Convert to image coordinates
-            let imageSize = cameraManager.currentFrameSize
             let bounds = CGRect(
                 x: observation.boundingBox.origin.x * imageSize.width,
                 y: (1 - observation.boundingBox.origin.y - observation.boundingBox.height) * imageSize.height,
@@ -101,7 +115,7 @@ struct CameraLiveView: View {
                 height: observation.boundingBox.height * imageSize.height
             )
 
-            // Check if we have a celebrity match for this face
+            // Find matching celebrity from server response
             let celebrity = findMatchingCelebrity(for: bounds)
             newFaces.append(DetectedFace(bounds: bounds, celebrity: celebrity))
         }
@@ -120,14 +134,18 @@ struct CameraLiveView: View {
         }
     }
 
-    private var lastServerMatches: [FastRecognitionMatch] = []
-
     private func findMatchingCelebrity(for bounds: CGRect) -> FastRecognitionMatch? {
         // Find a match from the last server response that overlaps with this face
-        for match in lastServerMatches {
+        for match in serverMatches {
             let matchBounds = match.boundingBox.cgRect
-            if bounds.intersects(matchBounds) || matchBounds.intersects(bounds) {
-                return match
+            // Check for significant overlap
+            let intersection = bounds.intersection(matchBounds)
+            if !intersection.isNull {
+                let overlapArea = intersection.width * intersection.height
+                let faceArea = bounds.width * bounds.height
+                if overlapArea > faceArea * 0.3 {  // 30% overlap threshold
+                    return match
+                }
             }
         }
         return nil
@@ -139,30 +157,15 @@ struct CameraLiveView: View {
 
         do {
             let response = try await APIService.shared.recognizeFast(image: image)
+            self.serverMatches = response.matches
 
-            // Store matches for face overlay
-            // Note: We need to make lastServerMatches mutable from this context
-            // For now, update detected faces directly with matches
+            // Update detected faces with celebrity info
             var updatedFaces: [DetectedFace] = []
             for face in detectedFaces {
-                var matchedCelebrity: FastRecognitionMatch?
-
-                // Find if any match overlaps with this face
-                for match in response.matches {
-                    let matchBounds = match.boundingBox.cgRect
-                    if face.bounds.intersects(matchBounds) {
-                        matchedCelebrity = match
-                        break
-                    }
-                }
-
+                let matchedCelebrity = findMatchingCelebrity(for: face.bounds)
                 updatedFaces.append(DetectedFace(bounds: face.bounds, celebrity: matchedCelebrity))
             }
-
             self.detectedFaces = updatedFaces
-
-            // If user taps on a recognized face, we can trigger the cutout
-            // This is handled in the FaceOverlayView
 
         } catch {
             print("Recognition error: \(error)")
@@ -178,9 +181,9 @@ class CameraManager: NSObject, ObservableObject {
     let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let sessionQueue = DispatchQueue(label: "camera.session")
-    private let processingQueue = DispatchQueue(label: "camera.processing")
+    private let processingQueue = DispatchQueue(label: "camera.processing", qos: .userInitiated)
 
-    @Published var currentFrameSize: CGSize = CGSize(width: 1920, height: 1080)
+    @Published var currentFrameSize: CGSize = CGSize(width: 1280, height: 720)
 
     var onFrameCaptured: ((UIImage, [VNFaceObservation]) -> Void)?
 
@@ -195,10 +198,13 @@ class CameraManager: NSObject, ObservableObject {
     }
 
     private func setupSession() {
+        session.beginConfiguration()
         session.sessionPreset = .hd1280x720
 
+        // Setup camera input
         guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
               let input = try? AVCaptureDeviceInput(device: camera) else {
+            session.commitConfiguration()
             return
         }
 
@@ -206,6 +212,7 @@ class CameraManager: NSObject, ObservableObject {
             session.addInput(input)
         }
 
+        // Setup video output for processing
         videoOutput.setSampleBufferDelegate(self, queue: processingQueue)
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.videoSettings = [
@@ -216,32 +223,30 @@ class CameraManager: NSObject, ObservableObject {
             session.addOutput(videoOutput)
         }
 
-        // Set video orientation
+        // Set video orientation for output
         if let connection = videoOutput.connection(with: .video) {
             if connection.isVideoRotationAngleSupported(90) {
                 connection.videoRotationAngle = 90
             }
         }
+
+        session.commitConfiguration()
     }
 
     private func setupFaceDetection() {
-        faceDetectionRequest = VNDetectFaceRectanglesRequest { [weak self] request, error in
-            guard error == nil,
-                  let observations = request.results as? [VNFaceObservation] else {
-                return
-            }
-            // Face observations will be processed in the sample buffer delegate
-        }
+        faceDetectionRequest = VNDetectFaceRectanglesRequest()
         faceDetectionRequest?.revision = VNDetectFaceRectanglesRequestRevision3
     }
 
     func startSession() {
+        guard !session.isRunning else { return }
         sessionQueue.async { [weak self] in
             self?.session.startRunning()
         }
     }
 
     func stopSession() {
+        guard session.isRunning else { return }
         sessionQueue.async { [weak self] in
             self?.session.stopRunning()
         }
@@ -265,7 +270,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
 
         // Run face detection
-        let requestHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+        let requestHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
 
         do {
             if let request = faceDetectionRequest {
@@ -290,30 +295,60 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     }
 }
 
-// MARK: - Camera Preview View
+// MARK: - Camera Preview (UIKit)
 
-struct CameraPreviewView: UIViewRepresentable {
+class CameraPreviewUIView: UIView {
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+
+    var session: AVCaptureSession? {
+        didSet {
+            setupPreviewLayer()
+        }
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .black
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        backgroundColor = .black
+    }
+
+    private func setupPreviewLayer() {
+        // Remove existing layer
+        previewLayer?.removeFromSuperlayer()
+
+        guard let session = session else { return }
+
+        let layer = AVCaptureVideoPreviewLayer(session: session)
+        layer.videoGravity = .resizeAspectFill
+        layer.frame = bounds
+
+        self.layer.addSublayer(layer)
+        self.previewLayer = layer
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // Critical: Update preview layer frame when view bounds change
+        previewLayer?.frame = bounds
+    }
+}
+
+struct CameraPreviewRepresentable: UIViewRepresentable {
     let session: AVCaptureSession
 
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView(frame: .zero)
-        let previewLayer = AVCaptureVideoPreviewLayer(session: session)
-        previewLayer.videoGravity = .resizeAspectFill
-        view.layer.addSublayer(previewLayer)
-        context.coordinator.previewLayer = previewLayer
+    func makeUIView(context: Context) -> CameraPreviewUIView {
+        let view = CameraPreviewUIView()
+        view.session = session
         return view
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.previewLayer?.frame = uiView.bounds
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    class Coordinator {
-        var previewLayer: AVCaptureVideoPreviewLayer?
+    func updateUIView(_ uiView: CameraPreviewUIView, context: Context) {
+        // Session is already set, just ensure layout
+        uiView.setNeedsLayout()
     }
 }
 
@@ -331,41 +366,41 @@ struct FaceOverlayView: View {
                 let scaledBounds = scaleBounds(face.bounds, from: imageSize, to: size)
 
                 // Draw face rectangle
-                let path = RoundedRectangle(cornerRadius: 8)
-                    .path(in: scaledBounds)
+                let path = RoundedRectangle(cornerRadius: 12)
+                    .path(in: scaledBounds.insetBy(dx: -4, dy: -4))
 
                 // Outer glow
                 context.stroke(
                     path,
-                    with: .color(Color(face.color).opacity(0.3)),
-                    lineWidth: 8
+                    with: .color(Color(face.color).opacity(0.4)),
+                    lineWidth: 12
                 )
 
                 // Main border
                 context.stroke(
                     path,
                     with: .color(Color(face.color)),
-                    lineWidth: 3
+                    lineWidth: 4
                 )
 
                 // Draw name label if celebrity is identified
                 if let name = face.name {
-                    let labelY = scaledBounds.maxY + 10
-                    let labelWidth = min(200, scaledBounds.width + 40)
+                    let labelHeight: CGFloat = 32
+                    let labelY = scaledBounds.maxY + 8
+                    let labelWidth = min(250, max(scaledBounds.width + 40, 120))
                     let labelX = scaledBounds.midX - labelWidth / 2
-                    let labelRect = CGRect(x: labelX, y: labelY, width: labelWidth, height: 30)
+                    let labelRect = CGRect(x: labelX, y: labelY, width: labelWidth, height: labelHeight)
 
-                    // Background
-                    let bgPath = RoundedRectangle(cornerRadius: 6)
+                    // Background pill
+                    let bgPath = Capsule()
                         .path(in: labelRect)
                     context.fill(bgPath, with: .color(Color(face.color)))
 
                     // Text
-                    let text = Text(name)
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(.white)
                     context.draw(
-                        text,
+                        Text(name)
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(.white),
                         at: CGPoint(x: labelRect.midX, y: labelRect.midY),
                         anchor: .center
                     )
