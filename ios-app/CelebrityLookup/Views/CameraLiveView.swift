@@ -11,6 +11,7 @@ struct CameraLiveView: View {
     @State private var isProcessing = false
     @State private var capturedImage: UIImage?
     @State private var serverMatches: [FastRecognitionMatch] = []
+    @State private var segmentationMask: CGImage?
 
     // Detail sheet state
     @State private var selectedCelebrity: FastRecognitionMatch?
@@ -31,11 +32,26 @@ struct CameraLiveView: View {
                 CameraPreviewRepresentable(session: cameraManager.session)
                     .ignoresSafeArea()
 
-                // Face overlay (non-interactive drawing)
+                // Silhouette overlay when we have a segmentation mask and recognized celebrity
+                if let mask = segmentationMask {
+                    let hasCelebrity = detectedFaces.contains { $0.celebrity != nil }
+                    if hasCelebrity {
+                        SilhouetteOverlayView(
+                            mask: mask,
+                            faces: detectedFaces,
+                            viewSize: geometry.size,
+                            imageSize: cameraManager.currentFrameSize
+                        )
+                        .allowsHitTesting(false)
+                    }
+                }
+
+                // Face overlay for unrecognized faces (rectangles) and name labels
                 FaceOverlayView(
                     faces: detectedFaces,
                     viewSize: geometry.size,
-                    imageSize: cameraManager.currentFrameSize
+                    imageSize: cameraManager.currentFrameSize,
+                    showRectangles: segmentationMask == nil  // Only show rectangles if no silhouette
                 )
 
                 // Interactive tap targets for celebrities
@@ -104,8 +120,8 @@ struct CameraLiveView: View {
         }
         .onAppear {
             cameraManager.startSession()
-            cameraManager.onFrameCaptured = { image, faces in
-                handleFrameCapture(image: image, visionFaces: faces)
+            cameraManager.onFrameCaptured = { image, faces, mask in
+                handleFrameCapture(image: image, visionFaces: faces, mask: mask)
             }
         }
         .onDisappear {
@@ -233,9 +249,14 @@ struct CameraLiveView: View {
         isLoadingDetails = false
     }
 
-    private func handleFrameCapture(image: UIImage, visionFaces: [VNFaceObservation]) {
+    private func handleFrameCapture(image: UIImage, visionFaces: [VNFaceObservation], mask: CGImage?) {
         capturedImage = image
         let imageSize = cameraManager.currentFrameSize
+
+        // Update segmentation mask
+        DispatchQueue.main.async {
+            self.segmentationMask = mask
+        }
 
         // Convert Vision face observations to our DetectedFace model
         var newFaces: [DetectedFace] = []
@@ -319,16 +340,20 @@ class CameraManager: NSObject, ObservableObject {
 
     @Published var currentFrameSize: CGSize = CGSize(width: 1280, height: 720)
 
-    var onFrameCaptured: ((UIImage, [VNFaceObservation]) -> Void)?
+    // Updated callback to include segmentation mask
+    var onFrameCaptured: ((UIImage, [VNFaceObservation], CGImage?) -> Void)?
 
     private var faceDetectionRequest: VNDetectFaceRectanglesRequest?
+    private var personSegmentationRequest: VNGeneratePersonSegmentationRequest?
     private var lastProcessedTime: Date = .distantPast
-    private let processInterval: TimeInterval = 0.1  // 10 fps for face detection
+    private let processInterval: TimeInterval = 0.1  // 10 fps for processing
+
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     override init() {
         super.init()
         setupSession()
-        setupFaceDetection()
+        setupVisionRequests()
     }
 
     private func setupSession() {
@@ -367,9 +392,16 @@ class CameraManager: NSObject, ObservableObject {
         session.commitConfiguration()
     }
 
-    private func setupFaceDetection() {
+    private func setupVisionRequests() {
+        // Face detection
         faceDetectionRequest = VNDetectFaceRectanglesRequest()
         faceDetectionRequest?.revision = VNDetectFaceRectanglesRequestRevision3
+
+        // Person segmentation - using .balanced for good quality with reasonable speed
+        // .fast is fastest but lower quality, .accurate is best quality but slower
+        personSegmentationRequest = VNGeneratePersonSegmentationRequest()
+        personSegmentationRequest?.qualityLevel = .balanced
+        personSegmentationRequest?.outputPixelFormat = kCVPixelFormatType_OneComponent8
     }
 
     func startSession() {
@@ -403,29 +435,61 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             self.currentFrameSize = CGSize(width: width, height: height)
         }
 
-        // Run face detection
+        // Run Vision requests
         let requestHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
 
+        var faceResults: [VNFaceObservation] = []
+        var segmentationMask: CGImage?
+
         do {
-            if let request = faceDetectionRequest {
-                try requestHandler.perform([request])
+            // Build requests array
+            var requests: [VNRequest] = []
+            if let faceRequest = faceDetectionRequest {
+                requests.append(faceRequest)
+            }
+            if let segRequest = personSegmentationRequest {
+                requests.append(segRequest)
+            }
 
-                if let results = request.results as? [VNFaceObservation] {
-                    // Convert to UIImage for API
-                    let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-                    let context = CIContext()
-                    if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
-                        let image = UIImage(cgImage: cgImage)
+            // Perform all requests
+            try requestHandler.perform(requests)
 
-                        DispatchQueue.main.async {
-                            self.onFrameCaptured?(image, results)
-                        }
-                    }
+            // Get face detection results
+            if let faceRequest = faceDetectionRequest,
+               let results = faceRequest.results as? [VNFaceObservation] {
+                faceResults = results
+            }
+
+            // Get person segmentation mask
+            if let segRequest = personSegmentationRequest,
+               let segResult = segRequest.results?.first as? VNPixelBufferObservation {
+                segmentationMask = createCGImage(from: segResult.pixelBuffer)
+            }
+
+            // Convert to UIImage for API
+            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+            if let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) {
+                let image = UIImage(cgImage: cgImage)
+
+                DispatchQueue.main.async {
+                    self.onFrameCaptured?(image, faceResults, segmentationMask)
                 }
             }
+
         } catch {
-            print("Face detection error: \(error)")
+            print("Vision processing error: \(error)")
         }
+    }
+
+    private func createCGImage(from pixelBuffer: CVPixelBuffer) -> CGImage? {
+        var ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+
+        // Flip vertically to match UIKit coordinate system
+        // CIImage has origin at bottom-left, CGImage/UIKit has origin at top-left
+        ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: 1, y: -1)
+            .translatedBy(x: 0, y: -ciImage.extent.height))
+
+        return ciContext.createCGImage(ciImage, from: ciImage.extent)
     }
 }
 
@@ -492,6 +556,7 @@ struct FaceOverlayView: View {
     let faces: [DetectedFace]
     let viewSize: CGSize
     let imageSize: CGSize
+    var showRectangles: Bool = true  // Whether to show rectangle borders
 
     var body: some View {
         Canvas { context, size in
@@ -499,23 +564,26 @@ struct FaceOverlayView: View {
                 // Scale face bounds to view size
                 let scaledBounds = scaleBounds(face.bounds, from: imageSize, to: size)
 
-                // Draw face rectangle
-                let path = RoundedRectangle(cornerRadius: 12)
-                    .path(in: scaledBounds.insetBy(dx: -4, dy: -4))
+                // Only draw rectangles for unrecognized faces, or when silhouette isn't available
+                if showRectangles || face.celebrity == nil {
+                    // Draw face rectangle
+                    let path = RoundedRectangle(cornerRadius: 12)
+                        .path(in: scaledBounds.insetBy(dx: -4, dy: -4))
 
-                // Outer glow
-                context.stroke(
-                    path,
-                    with: .color(Color(face.color).opacity(0.4)),
-                    lineWidth: 12
-                )
+                    // Outer glow
+                    context.stroke(
+                        path,
+                        with: .color(Color(face.color).opacity(0.4)),
+                        lineWidth: 12
+                    )
 
-                // Main border
-                context.stroke(
-                    path,
-                    with: .color(Color(face.color)),
-                    lineWidth: 4
-                )
+                    // Main border
+                    context.stroke(
+                        path,
+                        with: .color(Color(face.color)),
+                        lineWidth: 4
+                    )
+                }
 
                 // Draw name label if celebrity is identified
                 if let name = face.name {
@@ -635,6 +703,179 @@ struct InteractiveFaceOverlay: View {
             height: bounds.height * scale
         )
     }
+}
+
+// MARK: - Silhouette Overlay View
+
+struct SilhouetteOverlayView: View {
+    let mask: CGImage
+    let faces: [DetectedFace]
+    let viewSize: CGSize
+    let imageSize: CGSize
+
+    var body: some View {
+        // Get the recognized celebrity's color
+        guard let celebrityFace = faces.first(where: { $0.celebrity != nil }) else {
+            return AnyView(EmptyView())
+        }
+
+        // Show the full segmentation edge with celebrity's color
+        // The segmentation naturally isolates people in the frame
+        return AnyView(
+            SilhouetteEdgeRepresentable(
+                mask: mask,
+                color: celebrityFace.color,
+                imageSize: imageSize
+            )
+            .ignoresSafeArea()
+        )
+    }
+}
+
+// MARK: - UIKit-based Silhouette Edge Renderer
+
+struct SilhouetteEdgeRepresentable: UIViewRepresentable {
+    let mask: CGImage
+    let color: UIColor
+    let imageSize: CGSize
+
+    func makeUIView(context: Context) -> SilhouetteEdgeView {
+        let view = SilhouetteEdgeView()
+        view.backgroundColor = .clear
+        view.isOpaque = false
+        view.contentMode = .redraw
+        return view
+    }
+
+    func updateUIView(_ uiView: SilhouetteEdgeView, context: Context) {
+        uiView.segmentationMask = mask
+        uiView.edgeColor = color
+        uiView.sourceImageSize = imageSize
+        uiView.setNeedsDisplay()
+    }
+}
+
+class SilhouetteEdgeView: UIView {
+    var segmentationMask: CGImage?
+    var edgeColor: UIColor = .systemBlue
+    var sourceImageSize: CGSize = .zero
+
+    private static let ciContext = CIContext(options: [
+        .useSoftwareRenderer: false,
+        .cacheIntermediates: false
+    ])
+
+    override func draw(_ rect: CGRect) {
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
+        guard let mask = segmentationMask else { return }
+
+        // Calculate aspect-fill rect for the mask
+        let maskSize = CGSize(width: mask.width, height: mask.height)
+        let drawRect = calculateAspectFillRect(maskSize: maskSize, targetSize: rect.size)
+
+        // Create edge from segmentation mask
+        var edgeImage: CGImage?
+        if let fastEdge = createFastEdge(from: mask, color: edgeColor) {
+            edgeImage = fastEdge
+        } else if let morphEdge = createMorphologicalEdge(from: mask, color: edgeColor) {
+            edgeImage = morphEdge
+        }
+
+        guard let finalEdge = edgeImage else { return }
+
+        // Draw the edge - CGContext.draw already handles coordinate conversion
+        ctx.draw(finalEdge, in: drawRect)
+    }
+
+    // Fast edge creation using CIEdges filter with transparent background
+    private func createFastEdge(from mask: CGImage, color: UIColor) -> CGImage? {
+        let ciMask = CIImage(cgImage: mask)
+
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+
+        // Apply edge detection using CIEdges
+        guard let edgeFilter = CIFilter(name: "CIEdges") else { return nil }
+        edgeFilter.setValue(ciMask, forKey: kCIInputImageKey)
+        edgeFilter.setValue(3.0, forKey: kCIInputIntensityKey)
+        guard let edges = edgeFilter.outputImage else { return nil }
+
+        // Create a solid color image
+        guard let colorGenerator = CIFilter(name: "CIConstantColorGenerator") else { return nil }
+        colorGenerator.setValue(CIColor(red: r, green: g, blue: b, alpha: 1.0), forKey: kCIInputColorKey)
+        guard let solidColor = colorGenerator.outputImage?.cropped(to: ciMask.extent) else { return nil }
+
+        // Convert edges to grayscale for alpha mask
+        guard let grayscale = CIFilter(name: "CIPhotoEffectMono") else { return nil }
+        grayscale.setValue(edges, forKey: kCIInputImageKey)
+        guard let grayEdges = grayscale.outputImage else { return nil }
+
+        // Blend solid color with transparent background using edges as mask
+        guard let blendFilter = CIFilter(name: "CIBlendWithMask") else { return nil }
+        blendFilter.setValue(solidColor, forKey: kCIInputImageKey)
+        blendFilter.setValue(CIImage.empty(), forKey: kCIInputBackgroundImageKey)
+        blendFilter.setValue(grayEdges, forKey: kCIInputMaskImageKey)
+        guard let result = blendFilter.outputImage else { return nil }
+
+        return Self.ciContext.createCGImage(result, from: ciMask.extent)
+    }
+
+    // Morphological edge detection: dilate - original = outer edge
+    private func createMorphologicalEdge(from mask: CGImage, color: UIColor) -> CGImage? {
+        let ciMask = CIImage(cgImage: mask)
+
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+
+        // Dilate the mask to expand it
+        guard let dilate = CIFilter(name: "CIMorphologyMaximum") else { return nil }
+        dilate.setValue(ciMask, forKey: kCIInputImageKey)
+        dilate.setValue(6.0, forKey: kCIInputRadiusKey)  // Edge thickness
+
+        guard let dilated = dilate.outputImage else { return nil }
+
+        // Subtract original from dilated to get outer edge only
+        guard let subtract = CIFilter(name: "CISubtractBlendMode") else { return nil }
+        subtract.setValue(dilated, forKey: kCIInputImageKey)
+        subtract.setValue(ciMask, forKey: kCIInputBackgroundImageKey)
+
+        guard let edgeMask = subtract.outputImage else { return nil }
+
+        // Create solid color
+        guard let colorGen = CIFilter(name: "CIConstantColorGenerator") else { return nil }
+        colorGen.setValue(CIColor(red: r, green: g, blue: b, alpha: 1.0), forKey: kCIInputColorKey)
+
+        guard let solidColor = colorGen.outputImage?.cropped(to: ciMask.extent) else { return nil }
+
+        // Use edge mask as alpha for the color
+        guard let blend = CIFilter(name: "CIBlendWithMask") else { return nil }
+        blend.setValue(solidColor, forKey: kCIInputImageKey)
+        blend.setValue(CIImage.empty(), forKey: kCIInputBackgroundImageKey)
+        blend.setValue(edgeMask, forKey: kCIInputMaskImageKey)
+
+        guard let result = blend.outputImage else { return nil }
+
+        return Self.ciContext.createCGImage(result, from: ciMask.extent)
+    }
+
+    private func calculateAspectFillRect(maskSize: CGSize, targetSize: CGSize) -> CGRect {
+        let scaleX = targetSize.width / maskSize.width
+        let scaleY = targetSize.height / maskSize.height
+        let scale = max(scaleX, scaleY)
+
+        let scaledWidth = maskSize.width * scale
+        let scaledHeight = maskSize.height * scale
+        let offsetX = (scaledWidth - targetSize.width) / 2
+        let offsetY = (scaledHeight - targetSize.height) / 2
+
+        return CGRect(
+            x: -offsetX,
+            y: -offsetY,
+            width: scaledWidth,
+            height: scaledHeight
+        )
+    }
+
 }
 
 // MARK: - Color Extension for SwiftUI
