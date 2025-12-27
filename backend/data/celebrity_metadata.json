@@ -1,0 +1,125 @@
+{
+  "tom_hanks": {
+    "name": "Tom Hanks",
+    "date_of_birth": "1956-07-09",
+    "birthplace": "Concord, California, USA",
+    "profession": ["Actor", "Producer", "Director"],
+    "biography": "Tom Hanks is an American actor and filmmaker, widely regarded as one of the greatest actors in film history. Known for his versatility and everyman persona, he has starred in numerous critically acclaimed and commercially successful films spanning multiple decades.",
+    "movies": [
+      {"title": "Forrest Gump", "year": 1994, "role": "Forrest Gump"},
+      {"title": "Cast Away", "year": 2000, "role": "Chuck Noland"},
+      {"title": "Saving Private Ryan", "year": 1998, "role": "Captain John Miller"},
+      {"title": "The Green Mile", "year": 1999, "role": "Paul Edgecomb"},
+      {"title": "Philadelphia", "year": 1993, "role": "Andrew Beckett"},
+      {"title": "Big", "year": 1988, "role": "Josh Baskin"},
+      {"title": "Toy Story", "year": 1995, "role": "Woody (voice)"},
+      {"title": "Apollo 13", "year": 1995, "role": "Jim Lovell"},
+      {"title": "A Beautiful Day in the Neighborhood", "year": 2019, "role": "Fred Rogers"},
+      {"title": "Elvis", "year": 2022, "role": "Colonel Tom Parker"}
+    ],
+    "music": [],
+    "awards": [
+      "Academy Award for Best Actor - Philadelphia (1994)",
+      "Academy Award for Best Actor - Forrest Gump (1995)",
+      "Golden Globe Award for Best Actor - Big (1989)",
+      "Golden Globe Award for Best Actor - Forrest Gump (1995)",
+      "Presidential Medal of Freedom (2016)"
+    ],
+    "image_url": null
+  },
+  "taylor_swift": {
+    "name": "Taylor Swift",
+    "date_of_birth": "1989-12-13",
+    "birthplace": "West Reading, Pennsylvania, USA",
+    "profession": ["Singer", "Songwriter", "Producer", "Actress"],
+    "biography": "Taylor Swift is an American singer-songwriter who has become one of the most influential and best-selling music artists of all time. Known for narrative songwriting often inspired by her personal life, she has successfully transitioned from country to pop music while consistently breaking records.",
+    "movies": [
+      {"title": "Valentine's Day", "year": 2010, "role": "Felicia"},
+      {"title": "The Giver", "year": 2014, "role": "Rosemary"},
+      {"title": "Cats", "year": 2019, "role": "Bombalurina"},
+      {"title": "Amsterdam", "year": 2022, "role": "Liz Meekins"}
+    ],
+    "music": [
+      {"title": "Taylor Swift", "year": 2006, "type": "album"},
+      {"title": "Fearless", "year": 2008, "type": "album"},
+      {"title": "Speak Now", "year": 2010, "type": "album"},
+      {"title": "Red", "year": 2012, "type": "album"},
+      {"title": "1989", "year": 2014, "type": "album"},
+      {"title": "Reputation", "year": 2017, "type": "album"},
+      {"title": "Lover", "year": 2019, "type": "album"},
+      {"title": "Folklore", "year": 2020, "type": "album"},
+      {"title": "Evermore", "year": 2020, "type": "album"},
+      {"title": "Midnights", "year": 2022, "type": "album"},
+      {"title": "The Tortured Poets Department", "year": 2024, "type": "album"}
+    ],
+    "awards": [
+      "Grammy Award for Album of the Year - Fearless (2010)",
+      "Grammy Award for Album of the Year - 1989 (2016)",
+      "Grammy Award for Album of the Year - Folklore (2021)",
+      "Grammy Award for Album of the Year - Midnights (2024)",
+      "Billboard Woman of the Decade (2019)",
+      "Time Person of the Year (2023)"
+    ],
+    "image_url": null
+  },
+  "dwayne_johnson": {
+    "name": "Dwayne Johnson",
+    "date_of_birth": "1972-05-02",
+    "birthplace": "Hayward, California, USA",
+    "profession": ["Actor", "Producer", "Professional Wrestler"],
+    "biography": "Dwayne 'The Rock' Johnson is an American actor, producer, and former professional wrestler. After a successful wrestling career in WWE, he became one of the highest-paid and most popular actors in Hollywood, known for his charismatic presence and action film roles.",
+    "movies": [
+      {"title": "The Scorpion King", "year": 2002, "role": "Mathayus"},
+      {"title": "Fast Five", "year": 2011, "role": "Luke Hobbs"},
+      {"title": "Jumanji: Welcome to the Jungle", "year": 2017, "role": "Dr. Smolder Bravestone"},
+      {"title": "Moana", "year": 2016, "role": "Maui (voice)"},
+      {"title": "San Andreas", "year": 2015, "role": "Ray Gaines"},
+      {"title": "Central Intelligence", "year": 2016, "role": "Bob Stone"},
+      {"title": "Rampage", "year": 2018, "role": "Davis Okoye"},
+      {"title": "Black Adam", "year": 2022, "role": "Black Adam"},
+      {"title": "Red Notice", "year": 2021, "role": "John Hartley"},
+      {"title": "Jungle Cruise", "year": 2021, "role": "Frank Wolff"}
+    ],
+    "music": [
+      {"title": "You're Welcome (from Moana)", "year": 2016, "type": "single"}
+    ],
+    "awards": [
+      "WWE Championship (10 times)",
+      "Royal Rumble Winner (2000)",
+      "Teen Choice Award for Choice Movie Actor: Action",
+      "Hollywood Walk of Fame Star (2017)"
+    ],
+    "image_url": null
+  },
+  "scarlett_johansson": {
+    "name": "Scarlett Johansson",
+    "date_of_birth": "1984-11-22",
+    "birthplace": "New York City, New York, USA",
+    "profession": ["Actress", "Singer", "Producer"],
+    "biography": "Scarlett Johansson is an American actress and singer. She is one of the world's highest-paid actresses and has been featured multiple times on Forbes' Celebrity 100 list. Known for her versatility, she has starred in a wide range of films from independent dramas to major blockbusters.",
+    "movies": [
+      {"title": "Lost in Translation", "year": 2003, "role": "Charlotte"},
+      {"title": "Girl with a Pearl Earring", "year": 2003, "role": "Griet"},
+      {"title": "The Avengers", "year": 2012, "role": "Black Widow"},
+      {"title": "Her", "year": 2013, "role": "Samantha (voice)"},
+      {"title": "Lucy", "year": 2014, "role": "Lucy"},
+      {"title": "Marriage Story", "year": 2019, "role": "Nicole Barber"},
+      {"title": "Jojo Rabbit", "year": 2019, "role": "Rosie Betzler"},
+      {"title": "Black Widow", "year": 2021, "role": "Natasha Romanoff"},
+      {"title": "Under the Skin", "year": 2013, "role": "The Female"},
+      {"title": "Avengers: Endgame", "year": 2019, "role": "Black Widow"}
+    ],
+    "music": [
+      {"title": "Anywhere I Lay My Head", "year": 2008, "type": "album"},
+      {"title": "Break Up", "year": 2009, "type": "album"}
+    ],
+    "awards": [
+      "BAFTA Award for Best Actress - Lost in Translation (2004)",
+      "Tony Award for Best Featured Actress (2010)",
+      "Saturn Award for Best Actress - Lucy (2015)",
+      "Academy Award Nomination - Marriage Story (2020)",
+      "Academy Award Nomination - Jojo Rabbit (2020)"
+    ],
+    "image_url": null
+  }
+}
