@@ -33,25 +33,26 @@ struct CameraLiveView: View {
                     .ignoresSafeArea()
 
                 // Silhouette overlay when we have a segmentation mask and recognized celebrity
-                if let mask = segmentationMask {
-                    let hasCelebrity = detectedFaces.contains { $0.celebrity != nil }
-                    if hasCelebrity {
-                        SilhouetteOverlayView(
-                            mask: mask,
-                            faces: detectedFaces,
-                            viewSize: geometry.size,
-                            imageSize: cameraManager.currentFrameSize
-                        )
-                        .allowsHitTesting(false)
-                    }
+                if let mask = segmentationMask,
+                   let celebrityFace = detectedFaces.first(where: { $0.celebrity != nil }) {
+                    SilhouetteOverlayView(
+                        mask: mask,
+                        faces: detectedFaces,
+                        viewSize: geometry.size,
+                        imageSize: cameraManager.currentFrameSize
+                    )
+                    .id("silhouette-\(celebrityFace.celebrity?.celebrityId ?? "none")")
+                    .allowsHitTesting(false)
                 }
 
                 // Face overlay for unrecognized faces (rectangles) and name labels
+                // Show rectangles when no celebrity silhouette is active
+                let hasCelebritySilhouette = segmentationMask != nil && detectedFaces.contains { $0.celebrity != nil }
                 FaceOverlayView(
                     faces: detectedFaces,
                     viewSize: geometry.size,
                     imageSize: cameraManager.currentFrameSize,
-                    showRectangles: segmentationMask == nil  // Only show rectangles if no silhouette
+                    showRectangles: !hasCelebritySilhouette
                 )
 
                 // Interactive tap targets for celebrities
@@ -397,10 +398,9 @@ class CameraManager: NSObject, ObservableObject {
         faceDetectionRequest = VNDetectFaceRectanglesRequest()
         faceDetectionRequest?.revision = VNDetectFaceRectanglesRequestRevision3
 
-        // Person segmentation - using .balanced for good quality with reasonable speed
-        // .fast is fastest but lower quality, .accurate is best quality but slower
+        // Person segmentation - using .accurate for best silhouette quality
         personSegmentationRequest = VNGeneratePersonSegmentationRequest()
-        personSegmentationRequest?.qualityLevel = .balanced
+        personSegmentationRequest?.qualityLevel = .accurate
         personSegmentationRequest?.outputPixelFormat = kCVPixelFormatType_OneComponent8
     }
 
@@ -714,18 +714,18 @@ struct SilhouetteOverlayView: View {
     let imageSize: CGSize
 
     var body: some View {
-        // Get the recognized celebrity's color
+        // Get the recognized celebrity's face and color
         guard let celebrityFace = faces.first(where: { $0.celebrity != nil }) else {
             return AnyView(EmptyView())
         }
 
-        // Show the full segmentation edge with celebrity's color
-        // The segmentation naturally isolates people in the frame
+        // Pass the celebrity's face bounds to isolate their silhouette
         return AnyView(
             SilhouetteEdgeRepresentable(
                 mask: mask,
                 color: celebrityFace.color,
-                imageSize: imageSize
+                imageSize: imageSize,
+                celebrityBounds: celebrityFace.bounds
             )
             .ignoresSafeArea()
         )
@@ -738,6 +738,7 @@ struct SilhouetteEdgeRepresentable: UIViewRepresentable {
     let mask: CGImage
     let color: UIColor
     let imageSize: CGSize
+    let celebrityBounds: CGRect  // Face bounds in image coordinates
 
     func makeUIView(context: Context) -> SilhouetteEdgeView {
         let view = SilhouetteEdgeView()
@@ -751,6 +752,7 @@ struct SilhouetteEdgeRepresentable: UIViewRepresentable {
         uiView.segmentationMask = mask
         uiView.edgeColor = color
         uiView.sourceImageSize = imageSize
+        uiView.celebrityBounds = celebrityBounds
         uiView.setNeedsDisplay()
     }
 }
@@ -759,6 +761,7 @@ class SilhouetteEdgeView: UIView {
     var segmentationMask: CGImage?
     var edgeColor: UIColor = .systemBlue
     var sourceImageSize: CGSize = .zero
+    var celebrityBounds: CGRect = .zero
 
     private static let ciContext = CIContext(options: [
         .useSoftwareRenderer: false,
@@ -767,24 +770,220 @@ class SilhouetteEdgeView: UIView {
 
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
-        guard let mask = segmentationMask else { return }
 
-        // Calculate aspect-fill rect for the mask
+        // Always clear first - critical for when mask is nil or changes
+        ctx.clear(rect)
+
+        guard let mask = segmentationMask else {
+            // No mask - view stays transparent
+            return
+        }
+
         let maskSize = CGSize(width: mask.width, height: mask.height)
         let drawRect = calculateAspectFillRect(maskSize: maskSize, targetSize: rect.size)
 
-        // Create edge from segmentation mask
-        var edgeImage: CGImage?
-        if let fastEdge = createFastEdge(from: mask, color: edgeColor) {
-            edgeImage = fastEdge
-        } else if let morphEdge = createMorphologicalEdge(from: mask, color: edgeColor) {
-            edgeImage = morphEdge
+        // Always regenerate edge - mask content changes every frame
+        if let edge = createCGEdge(from: mask, color: edgeColor) {
+            ctx.draw(edge, in: drawRect)
+        }
+    }
+
+    // Use Core Graphics for edge detection - optimized version
+    private func createCGEdge(from mask: CGImage, color: UIColor) -> CGImage? {
+        let width = mask.width
+        let height = mask.height
+
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                  data: nil,
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bytesPerRow: width * 4,
+                  space: colorSpace,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else {
+            return nil
         }
 
-        guard let finalEdge = edgeImage else { return }
+        context.draw(mask, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        // Draw the edge - CGContext.draw already handles coordinate conversion
-        ctx.draw(finalEdge, in: drawRect)
+        guard let maskData = context.data else { return nil }
+        let pixels = maskData.bindMemory(to: UInt8.self, capacity: width * height * 4)
+
+        guard let outContext = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+
+        guard let outData = outContext.data else { return nil }
+        let outPixels = outData.bindMemory(to: UInt8.self, capacity: width * height * 4)
+
+        // Initialize output to transparent
+        memset(outData, 0, width * height * 4)
+
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+        let rByte = UInt8(r * 255)
+        let gByte = UInt8(g * 255)
+        let bByte = UInt8(b * 255)
+
+        let edgeRadius = 1  // Thin edge for cleaner look
+
+        // Fast edge detection using only 4 neighbors (up, down, left, right)
+        for y in 1..<(height - 1) {
+            for x in 1..<(width - 1) {
+                let idx = (y * width + x) * 4
+                let currentVal = Int(pixels[idx])
+
+                // Skip if current pixel is not part of the mask
+                if currentVal < 50 { continue }
+
+                // Check 4-connected neighbors for edge
+                let upIdx = ((y - 1) * width + x) * 4
+                let downIdx = ((y + 1) * width + x) * 4
+                let leftIdx = (y * width + (x - 1)) * 4
+                let rightIdx = (y * width + (x + 1)) * 4
+
+                let upVal = Int(pixels[upIdx])
+                let downVal = Int(pixels[downIdx])
+                let leftVal = Int(pixels[leftIdx])
+                let rightVal = Int(pixels[rightIdx])
+
+                // Edge if any neighbor has significantly different value
+                let isEdge = (abs(currentVal - upVal) > 50) ||
+                             (abs(currentVal - downVal) > 50) ||
+                             (abs(currentVal - leftVal) > 50) ||
+                             (abs(currentVal - rightVal) > 50)
+
+                if isEdge {
+                    // Draw thicker edge by filling a small area
+                    for dy in -edgeRadius...edgeRadius {
+                        for dx in -edgeRadius...edgeRadius {
+                            let py = y + dy
+                            let px = x + dx
+                            if py >= 0 && py < height && px >= 0 && px < width {
+                                let pIdx = (py * width + px) * 4
+                                outPixels[pIdx] = rByte
+                                outPixels[pIdx + 1] = gByte
+                                outPixels[pIdx + 2] = bByte
+                                outPixels[pIdx + 3] = 255
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return outContext.makeImage()
+    }
+
+    // Simple approach: just colorize the mask outline
+    private func createSimpleColoredEdge(from mask: CGImage, color: UIColor) -> CGImage? {
+        let ciMask = CIImage(cgImage: mask)
+        let extent = ciMask.extent
+
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+
+        // The mask is grayscale - convert to RGB and detect edges
+        // Use Sobel/edge detection via CIEdges
+        guard let edges = CIFilter(name: "CIEdges") else {
+            print("CIEdges filter not available")
+            return nil
+        }
+        edges.setValue(ciMask, forKey: kCIInputImageKey)
+        edges.setValue(5.0, forKey: kCIInputIntensityKey)
+
+        guard let edgeOutput = edges.outputImage else {
+            print("Edge detection failed")
+            return nil
+        }
+
+        // Colorize the edges
+        guard let colorMatrix = CIFilter(name: "CIColorMatrix") else {
+            print("CIColorMatrix not available")
+            return nil
+        }
+        colorMatrix.setValue(edgeOutput, forKey: kCIInputImageKey)
+        colorMatrix.setValue(CIVector(x: r, y: 0, z: 0, w: 0), forKey: "inputRVector")
+        colorMatrix.setValue(CIVector(x: 0, y: g, z: 0, w: 0), forKey: "inputGVector")
+        colorMatrix.setValue(CIVector(x: 0, y: 0, z: b, w: 0), forKey: "inputBVector")
+        colorMatrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+
+        guard let coloredEdges = colorMatrix.outputImage else {
+            print("Color matrix failed")
+            return nil
+        }
+
+        return Self.ciContext.createCGImage(coloredEdges, from: extent)
+    }
+
+    // Mask the edge image to only show within the celebrity's region (with soft edges)
+    private func maskEdgeToRegion(edge: CGImage) -> CGImage? {
+        guard sourceImageSize.width > 0 && sourceImageSize.height > 0 else { return edge }
+        guard celebrityBounds.width > 0 && celebrityBounds.height > 0 else { return edge }
+
+        let edgeWidth = CGFloat(edge.width)
+        let edgeHeight = CGFloat(edge.height)
+
+        // Scale face bounds from image coordinates to edge image coordinates
+        let scaleX = edgeWidth / sourceImageSize.width
+        let scaleY = edgeHeight / sourceImageSize.height
+
+        // The segmentation mask was flipped vertically, so flip the Y coordinate
+        let flippedFaceY = sourceImageSize.height - celebrityBounds.maxY
+
+        // Expand face bounds to cover the body generously
+        let expandedBounds = CGRect(
+            x: celebrityBounds.minX - celebrityBounds.width * 2.0,
+            y: flippedFaceY - celebrityBounds.height * 0.5,
+            width: celebrityBounds.width * 5,
+            height: celebrityBounds.height * 6
+        )
+
+        // Convert to edge image coordinates
+        let edgeRegion = CGRect(
+            x: expandedBounds.minX * scaleX,
+            y: expandedBounds.minY * scaleY,
+            width: expandedBounds.width * scaleX,
+            height: expandedBounds.height * scaleY
+        ).intersection(CGRect(x: 0, y: 0, width: edgeWidth, height: edgeHeight))
+
+        guard !edgeRegion.isEmpty else { return edge }
+
+        let ciEdge = CIImage(cgImage: edge)
+
+        // Create a soft radial gradient mask centered on the celebrity
+        // This gives a natural falloff instead of hard rectangle edges
+        let centerX = edgeRegion.midX
+        let centerY = edgeRegion.midY
+        let radius = max(edgeRegion.width, edgeRegion.height) * 0.7
+
+        guard let gradientFilter = CIFilter(name: "CIRadialGradient") else { return edge }
+        gradientFilter.setValue(CIVector(x: centerX, y: centerY), forKey: "inputCenter")
+        gradientFilter.setValue(radius * 0.6, forKey: "inputRadius0")  // Full opacity radius
+        gradientFilter.setValue(radius, forKey: "inputRadius1")        // Fade to transparent radius
+        gradientFilter.setValue(CIColor.white, forKey: "inputColor0")
+        gradientFilter.setValue(CIColor(red: 1, green: 1, blue: 1, alpha: 0), forKey: "inputColor1")
+
+        guard let gradient = gradientFilter.outputImage?.cropped(to: ciEdge.extent) else { return edge }
+
+        // Use the gradient as alpha mask for the edge
+        guard let blendFilter = CIFilter(name: "CIBlendWithMask") else { return edge }
+        blendFilter.setValue(ciEdge, forKey: kCIInputImageKey)
+        blendFilter.setValue(CIImage.empty(), forKey: kCIInputBackgroundImageKey)
+        blendFilter.setValue(gradient, forKey: kCIInputMaskImageKey)
+
+        guard let result = blendFilter.outputImage else { return edge }
+        return Self.ciContext.createCGImage(result, from: ciEdge.extent)
     }
 
     // Fast edge creation using CIEdges filter with transparent background
@@ -794,11 +993,17 @@ class SilhouetteEdgeView: UIView {
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         color.getRed(&r, green: &g, blue: &b, alpha: &a)
 
-        // Apply edge detection using CIEdges
+        // Apply edge detection using CIEdges with higher intensity
         guard let edgeFilter = CIFilter(name: "CIEdges") else { return nil }
         edgeFilter.setValue(ciMask, forKey: kCIInputImageKey)
-        edgeFilter.setValue(3.0, forKey: kCIInputIntensityKey)
+        edgeFilter.setValue(8.0, forKey: kCIInputIntensityKey)  // Increased for thicker edges
         guard let edges = edgeFilter.outputImage else { return nil }
+
+        // Dilate edges to make them thicker
+        guard let dilate = CIFilter(name: "CIMorphologyMaximum") else { return nil }
+        dilate.setValue(edges, forKey: kCIInputImageKey)
+        dilate.setValue(3.0, forKey: kCIInputRadiusKey)  // Thicken the edge
+        guard let thickEdges = dilate.outputImage else { return nil }
 
         // Create a solid color image
         guard let colorGenerator = CIFilter(name: "CIConstantColorGenerator") else { return nil }
@@ -807,7 +1012,7 @@ class SilhouetteEdgeView: UIView {
 
         // Convert edges to grayscale for alpha mask
         guard let grayscale = CIFilter(name: "CIPhotoEffectMono") else { return nil }
-        grayscale.setValue(edges, forKey: kCIInputImageKey)
+        grayscale.setValue(thickEdges, forKey: kCIInputImageKey)
         guard let grayEdges = grayscale.outputImage else { return nil }
 
         // Blend solid color with transparent background using edges as mask
@@ -823,6 +1028,7 @@ class SilhouetteEdgeView: UIView {
     // Morphological edge detection: dilate - original = outer edge
     private func createMorphologicalEdge(from mask: CGImage, color: UIColor) -> CGImage? {
         let ciMask = CIImage(cgImage: mask)
+        let extent = ciMask.extent
 
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         color.getRed(&r, green: &g, blue: &b, alpha: &a)
@@ -832,20 +1038,20 @@ class SilhouetteEdgeView: UIView {
         dilate.setValue(ciMask, forKey: kCIInputImageKey)
         dilate.setValue(6.0, forKey: kCIInputRadiusKey)  // Edge thickness
 
-        guard let dilated = dilate.outputImage else { return nil }
+        guard let dilated = dilate.outputImage?.cropped(to: extent) else { return nil }
 
         // Subtract original from dilated to get outer edge only
         guard let subtract = CIFilter(name: "CISubtractBlendMode") else { return nil }
         subtract.setValue(dilated, forKey: kCIInputImageKey)
         subtract.setValue(ciMask, forKey: kCIInputBackgroundImageKey)
 
-        guard let edgeMask = subtract.outputImage else { return nil }
+        guard let edgeMask = subtract.outputImage?.cropped(to: extent) else { return nil }
 
         // Create solid color
         guard let colorGen = CIFilter(name: "CIConstantColorGenerator") else { return nil }
         colorGen.setValue(CIColor(red: r, green: g, blue: b, alpha: 1.0), forKey: kCIInputColorKey)
 
-        guard let solidColor = colorGen.outputImage?.cropped(to: ciMask.extent) else { return nil }
+        guard let solidColor = colorGen.outputImage?.cropped(to: extent) else { return nil }
 
         // Use edge mask as alpha for the color
         guard let blend = CIFilter(name: "CIBlendWithMask") else { return nil }
@@ -855,7 +1061,7 @@ class SilhouetteEdgeView: UIView {
 
         guard let result = blend.outputImage else { return nil }
 
-        return Self.ciContext.createCGImage(result, from: ciMask.extent)
+        return Self.ciContext.createCGImage(result, from: extent)
     }
 
     private func calculateAspectFillRect(maskSize: CGSize, targetSize: CGSize) -> CGRect {

@@ -121,5 +121,30 @@
       "Academy Award Nomination - Jojo Rabbit (2020)"
     ],
     "image_url": null
+  },
+  "george_michael": {
+    "name": "George Michael",
+    "date_of_birth": "1963-06-25",
+    "birthplace": "East Finchley, London, England",
+    "profession": ["Singer", "Songwriter", "Producer"],
+    "biography": "George Michael was a British singer, songwriter, and record producer who rose to fame as a member of the pop duo Wham! before embarking on a highly successful solo career. Known for his soulful voice and heartfelt songwriting, he became one of the best-selling music artists of all time.",
+    "movies": [],
+    "music": [
+      {"title": "Fantastic", "year": 1983, "type": "album"},
+      {"title": "Make It Big", "year": 1984, "type": "album"},
+      {"title": "Faith", "year": 1987, "type": "album"},
+      {"title": "Listen Without Prejudice Vol. 1", "year": 1990, "type": "album"},
+      {"title": "Older", "year": 1996, "type": "album"},
+      {"title": "Songs from the Last Century", "year": 1999, "type": "album"},
+      {"title": "Patience", "year": 2004, "type": "album"}
+    ],
+    "awards": [
+      "Grammy Award for Album of the Year - Faith (1989)",
+      "Grammy Award for Best Male Pop Vocal Performance (1989)",
+      "Brit Award for Best British Male Solo Artist (1988, 1997)",
+      "MTV Video Music Award for Best Male Video (1989)",
+      "American Music Award for Favorite Pop/Rock Male Artist (1989)"
+    ],
+    "image_url": null
   }
 }
