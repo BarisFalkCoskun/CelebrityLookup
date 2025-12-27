@@ -31,11 +31,21 @@ struct CameraLiveView: View {
                 CameraPreviewRepresentable(session: cameraManager.session)
                     .ignoresSafeArea()
 
-                // Face overlay
+                // Face overlay (non-interactive drawing)
                 FaceOverlayView(
                     faces: detectedFaces,
                     viewSize: geometry.size,
                     imageSize: cameraManager.currentFrameSize
+                )
+
+                // Interactive tap targets for celebrities
+                InteractiveFaceOverlay(
+                    faces: detectedFaces,
+                    viewSize: geometry.size,
+                    imageSize: cameraManager.currentFrameSize,
+                    onCelebrityTapped: { celebrity in
+                        selectCelebrity(celebrity)
+                    }
                 )
 
                 // Top bar
@@ -75,10 +85,14 @@ struct CameraLiveView: View {
                             Text("\(serverMatches.count) celebrity detected")
                                 .font(.headline)
                                 .foregroundColor(.white)
+                            Text("Tap on a name to see details")
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.7))
+                        } else {
+                            Text("Point at a celebrity to identify them")
+                                .font(.subheadline)
+                                .foregroundColor(.white.opacity(0.8))
                         }
-                        Text("Point at a celebrity to identify them")
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.8))
                     }
                     .padding(.horizontal, 20)
                     .padding(.vertical, 12)
@@ -97,6 +111,126 @@ struct CameraLiveView: View {
         .onDisappear {
             cameraManager.stopSession()
         }
+        .sheet(isPresented: $showingDetails) {
+            celebrityDetailSheet
+        }
+    }
+
+    // MARK: - Celebrity Detail Sheet
+
+    @ViewBuilder
+    private var celebrityDetailSheet: some View {
+        if let details = celebrityDetails {
+            // CelebrityDetailView has its own NavigationStack
+            CelebrityDetailView(details: details)
+        } else {
+            NavigationStack {
+                Group {
+                    if isLoadingDetails {
+                        VStack(spacing: 16) {
+                            ProgressView()
+                                .scaleEffect(1.5)
+                            Text("Loading details...")
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if let celebrity = selectedCelebrity {
+                        // Fallback view with basic info
+                        ScrollView {
+                            VStack(spacing: 24) {
+                                // Profile icon
+                                ZStack {
+                                    Circle()
+                                        .fill(Color(celebrity.uiColor).opacity(0.2))
+                                        .frame(width: 120, height: 120)
+                                    Image(systemName: "person.fill")
+                                        .font(.system(size: 50))
+                                        .foregroundColor(Color(celebrity.uiColor))
+                                }
+                                .padding(.top, 20)
+
+                                // Name
+                                Text(celebrity.name)
+                                    .font(.largeTitle)
+                                    .fontWeight(.bold)
+
+                                // Confidence badge
+                                HStack(spacing: 8) {
+                                    Image(systemName: "checkmark.seal.fill")
+                                        .foregroundColor(.green)
+                                    Text("\(Int(celebrity.confidence * 100))% confidence match")
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(Color(.systemGray6))
+                                .cornerRadius(20)
+
+                                Divider()
+                                    .padding(.horizontal)
+
+                                // Info card
+                                VStack(spacing: 12) {
+                                    Image(systemName: "info.circle")
+                                        .font(.system(size: 30))
+                                        .foregroundColor(.secondary)
+
+                                    Text("Detailed information not available")
+                                        .font(.headline)
+                                        .foregroundColor(.secondary)
+
+                                    Text("We recognized this celebrity but couldn't fetch their detailed profile from the database.")
+                                        .font(.subheadline)
+                                        .foregroundColor(.secondary)
+                                        .multilineTextAlignment(.center)
+                                }
+                                .padding()
+                                .frame(maxWidth: .infinity)
+                                .background(Color(.systemGray6))
+                                .cornerRadius(12)
+                                .padding(.horizontal)
+
+                                Spacer()
+                            }
+                        }
+                    }
+                }
+                .navigationTitle(selectedCelebrity?.name ?? "Celebrity")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button("Done") {
+                            showingDetails = false
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    private func selectCelebrity(_ celebrity: FastRecognitionMatch) {
+        selectedCelebrity = celebrity
+        celebrityDetails = nil
+        isLoadingDetails = true
+        showingDetails = true
+
+        Task {
+            await loadCelebrityDetails(id: celebrity.celebrityId)
+        }
+    }
+
+    @MainActor
+    private func loadCelebrityDetails(id: String) async {
+        do {
+            let details = try await APIService.shared.getCelebrityDetails(id: id)
+            self.celebrityDetails = details
+        } catch {
+            print("Failed to load celebrity details: \(error)")
+            // Keep showing the fallback view with basic info
+        }
+        isLoadingDetails = false
     }
 
     private func handleFrameCapture(image: UIImage, visionFaces: [VNFaceObservation]) {
@@ -418,6 +552,77 @@ struct FaceOverlayView: View {
         let scale = max(scaleX, scaleY)
 
         // Calculate the offset due to aspect fill
+        let scaledWidth = source.width * scale
+        let scaledHeight = source.height * scale
+        let offsetX = (scaledWidth - target.width) / 2
+        let offsetY = (scaledHeight - target.height) / 2
+
+        return CGRect(
+            x: bounds.origin.x * scale - offsetX,
+            y: bounds.origin.y * scale - offsetY,
+            width: bounds.width * scale,
+            height: bounds.height * scale
+        )
+    }
+}
+
+// MARK: - Interactive Face Overlay
+
+struct InteractiveFaceOverlay: View {
+    let faces: [DetectedFace]
+    let viewSize: CGSize
+    let imageSize: CGSize
+    let onCelebrityTapped: (FastRecognitionMatch) -> Void
+
+    var body: some View {
+        ZStack {
+            ForEach(faces) { face in
+                if let celebrity = face.celebrity {
+                    // Create tappable area for recognized celebrities
+                    let scaledBounds = scaleBounds(face.bounds, from: imageSize, to: viewSize)
+                    let labelHeight: CGFloat = 32
+                    let labelY = scaledBounds.maxY + 8
+                    let labelWidth = min(250, max(scaledBounds.width + 40, 120))
+                    let labelX = scaledBounds.midX - labelWidth / 2
+
+                    // Invisible tap target over the face box and name label
+                    Button(action: {
+                        onCelebrityTapped(celebrity)
+                    }) {
+                        Color.clear
+                    }
+                    .frame(width: scaledBounds.width + 20, height: scaledBounds.height + labelHeight + 30)
+                    .position(
+                        x: scaledBounds.midX,
+                        y: scaledBounds.midY + labelHeight / 2
+                    )
+                    .contentShape(Rectangle())
+
+                    // Info button indicator
+                    Button(action: {
+                        onCelebrityTapped(celebrity)
+                    }) {
+                        Image(systemName: "info.circle.fill")
+                            .font(.system(size: 24))
+                            .foregroundColor(.white)
+                            .shadow(color: .black.opacity(0.5), radius: 4)
+                    }
+                    .position(
+                        x: scaledBounds.maxX - 5,
+                        y: scaledBounds.minY + 5
+                    )
+                }
+            }
+        }
+    }
+
+    private func scaleBounds(_ bounds: CGRect, from source: CGSize, to target: CGSize) -> CGRect {
+        guard source.width > 0 && source.height > 0 else { return .zero }
+
+        let scaleX = target.width / source.width
+        let scaleY = target.height / source.height
+        let scale = max(scaleX, scaleY)
+
         let scaledWidth = source.width * scale
         let scaledHeight = source.height * scale
         let offsetX = (scaledWidth - target.width) / 2
