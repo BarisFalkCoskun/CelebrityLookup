@@ -1,10 +1,12 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import numpy as np
 import cv2
 import base64
 from contextlib import asynccontextmanager
+from typing import Optional
+from pydantic import BaseModel
 
 from app.ml.pipeline import CelebrityPipeline
 from app.celebrity_db import get_celebrity_info, list_celebrities, add_celebrity
@@ -14,6 +16,39 @@ from app.database import init_db
 
 # Global pipeline instance
 pipeline = None
+
+
+# Request models for new endpoints
+class CutoutRequest(BaseModel):
+    face_x: int
+    face_y: int
+    face_width: int
+    face_height: int
+    color: str
+    name: str
+
+
+class FastRecognitionMatch(BaseModel):
+    celebrity_id: str
+    name: str
+    confidence: float
+    color: str
+    face_index: int
+    bounding_box: BoundingBox
+
+
+class FastRecognitionFace(BaseModel):
+    bounding_box: BoundingBox
+
+
+class FastRecognitionResponse(BaseModel):
+    faces: list[FastRecognitionFace]
+    matches: list[FastRecognitionMatch]
+
+
+class CutoutResponse(BaseModel):
+    cutout_image: str  # Base64 PNG with transparency
+    presentation_image: str  # Base64 PNG of B99-style presentation
 
 
 @asynccontextmanager
@@ -38,7 +73,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Celebrity Lookup API",
     description="Identify celebrities in photos with colored outlines and detailed information",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -58,7 +93,7 @@ async def root():
     return {
         "status": "healthy",
         "service": "Celebrity Lookup API",
-        "version": "1.0.0"
+        "version": "2.0.0"
     }
 
 
@@ -136,6 +171,135 @@ async def recognize_celebrities(image: UploadFile = File(...)):
         return RecognitionResponse(
             annotated_image=img_base64,
             celebrities=celebrities
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
+
+
+@app.post("/recognize-fast", response_model=FastRecognitionResponse)
+async def recognize_celebrities_fast(image: UploadFile = File(...)):
+    """
+    Fast celebrity recognition for real-time use.
+
+    - Detects faces and matches against celebrity database
+    - No segmentation (much faster)
+    - Returns face locations and celebrity matches
+
+    **Use case:** Real-time camera feed processing
+    """
+    if pipeline is None:
+        raise HTTPException(status_code=503, detail="ML pipeline not initialized")
+
+    if not image.content_type or not image.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+
+    try:
+        contents = await image.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if img is None:
+            raise HTTPException(status_code=400, detail="Could not decode image")
+
+        # Run fast pipeline (no segmentation)
+        results = pipeline.process_fast(img)
+
+        # Build response
+        faces = [
+            FastRecognitionFace(
+                bounding_box=BoundingBox(
+                    x=f["bbox"]["x"],
+                    y=f["bbox"]["y"],
+                    width=f["bbox"]["width"],
+                    height=f["bbox"]["height"]
+                )
+            )
+            for f in results["faces"]
+        ]
+
+        matches = [
+            FastRecognitionMatch(
+                celebrity_id=m["celebrity_id"],
+                name=m["name"],
+                confidence=m["confidence"],
+                color=m["color"],
+                face_index=m["face_index"],
+                bounding_box=BoundingBox(
+                    x=m["bbox"]["x"],
+                    y=m["bbox"]["y"],
+                    width=m["bbox"]["width"],
+                    height=m["bbox"]["height"]
+                )
+            )
+            for m in results["matches"]
+        ]
+
+        return FastRecognitionResponse(faces=faces, matches=matches)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
+
+
+@app.post("/cutout", response_model=CutoutResponse)
+async def generate_cutout(
+    image: UploadFile = File(...),
+    face_x: int = Form(...),
+    face_y: int = Form(...),
+    face_width: int = Form(...),
+    face_height: int = Form(...),
+    color: str = Form(...),
+    name: str = Form(...)
+):
+    """
+    Generate Brooklyn Nine-Nine style cutout for a specific person.
+
+    - High-quality person segmentation
+    - Transparent cutout of just the person
+    - B99-style presentation with gradient background and name
+
+    **Request:** Multipart form with:
+    - image: The original image
+    - face_x, face_y, face_width, face_height: Face bounding box
+    - color: Hex color for the theme
+    - name: Celebrity name to display
+    """
+    if pipeline is None:
+        raise HTTPException(status_code=503, detail="ML pipeline not initialized")
+
+    if not image.content_type or not image.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+
+    try:
+        contents = await image.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if img is None:
+            raise HTTPException(status_code=400, detail="Could not decode image")
+
+        # Generate cutout
+        face_box = {
+            "x": face_x,
+            "y": face_y,
+            "width": face_width,
+            "height": face_height
+        }
+
+        result = pipeline.generate_cutout(img, face_box, color, name)
+
+        # Encode cutout as PNG with transparency
+        cutout_pil = cv2.cvtColor(result["cutout_rgba"], cv2.COLOR_RGBA2BGRA)
+        _, cutout_buffer = cv2.imencode('.png', cutout_pil)
+        cutout_base64 = base64.b64encode(cutout_buffer).decode('utf-8')
+
+        # Encode presentation as PNG
+        _, presentation_buffer = cv2.imencode('.png', result["presentation_bgr"])
+        presentation_base64 = base64.b64encode(presentation_buffer).decode('utf-8')
+
+        return CutoutResponse(
+            cutout_image=cutout_base64,
+            presentation_image=presentation_base64
         )
 
     except Exception as e:

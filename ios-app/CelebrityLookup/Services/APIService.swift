@@ -50,7 +50,7 @@ class APIService {
 
     private init() {}
 
-    // MARK: - Recognize Celebrities
+    // MARK: - Recognize Celebrities (Full Processing)
 
     func recognizeCelebrities(image: UIImage) async throws -> RecognitionResponse {
         guard let imageData = image.jpegData(compressionQuality: 0.8) else {
@@ -93,6 +93,132 @@ class APIService {
 
             let decoder = JSONDecoder()
             return try decoder.decode(RecognitionResponse.self, from: data)
+
+        } catch let error as APIError {
+            throw error
+        } catch let error as DecodingError {
+            throw APIError.decodingError(error)
+        } catch {
+            throw APIError.networkError(error)
+        }
+    }
+
+    // MARK: - Fast Recognition (Real-time)
+
+    func recognizeFast(image: UIImage) async throws -> FastRecognitionResponse {
+        // Use lower quality for faster upload in real-time
+        guard let imageData = image.jpegData(compressionQuality: 0.5) else {
+            throw APIError.invalidImage
+        }
+
+        guard let url = URL(string: "\(baseURL)/recognize-fast") else {
+            throw APIError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 10  // Faster timeout for real-time
+
+        let boundary = UUID().uuidString
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"image\"; filename=\"frame.jpg\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+        body.append(imageData)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+
+        request.httpBody = body
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw APIError.unknown
+            }
+
+            guard httpResponse.statusCode == 200 else {
+                throw APIError.serverError(httpResponse.statusCode)
+            }
+
+            let decoder = JSONDecoder()
+            return try decoder.decode(FastRecognitionResponse.self, from: data)
+
+        } catch let error as APIError {
+            throw error
+        } catch let error as DecodingError {
+            throw APIError.decodingError(error)
+        } catch {
+            throw APIError.networkError(error)
+        }
+    }
+
+    // MARK: - Generate B99 Cutout
+
+    func generateCutout(
+        image: UIImage,
+        faceBox: BoundingBox,
+        color: String,
+        name: String
+    ) async throws -> CutoutResponse {
+        guard let imageData = image.jpegData(compressionQuality: 0.9) else {
+            throw APIError.invalidImage
+        }
+
+        guard let url = URL(string: "\(baseURL)/cutout") else {
+            throw APIError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+
+        let boundary = UUID().uuidString
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+
+        // Add image
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"image\"; filename=\"photo.jpg\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+        body.append(imageData)
+        body.append("\r\n".data(using: .utf8)!)
+
+        // Add form fields
+        let fields: [(String, String)] = [
+            ("face_x", String(faceBox.x)),
+            ("face_y", String(faceBox.y)),
+            ("face_width", String(faceBox.width)),
+            ("face_height", String(faceBox.height)),
+            ("color", color),
+            ("name", name)
+        ]
+
+        for (key, value) in fields {
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"\(key)\"\r\n\r\n".data(using: .utf8)!)
+            body.append("\(value)\r\n".data(using: .utf8)!)
+        }
+
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+
+        request.httpBody = body
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw APIError.unknown
+            }
+
+            guard httpResponse.statusCode == 200 else {
+                throw APIError.serverError(httpResponse.statusCode)
+            }
+
+            let decoder = JSONDecoder()
+            return try decoder.decode(CutoutResponse.self, from: data)
 
         } catch let error as APIError {
             throw error

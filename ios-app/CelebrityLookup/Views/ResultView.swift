@@ -2,7 +2,9 @@ import SwiftUI
 
 struct ResultView: View {
     let response: RecognitionResponse
-    let onDismiss: () -> Void
+    let originalImage: UIImage?
+    let onReset: () -> Void
+    let onCelebrityTapped: (CelebrityMatch) -> Void
 
     @State private var selectedCelebrity: CelebrityMatch?
     @State private var celebrityDetails: CelebrityDetails?
@@ -18,7 +20,7 @@ struct ResultView: View {
         VStack(spacing: 0) {
             // Header with back button
             HStack {
-                Button(action: onDismiss) {
+                Button(action: onReset) {
                     HStack(spacing: 4) {
                         Image(systemName: "chevron.left")
                         Text("Back")
@@ -36,13 +38,13 @@ struct ResultView: View {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(maxHeight: UIScreen.main.bounds.height * 0.55)
+                    .frame(maxHeight: UIScreen.main.bounds.height * 0.5)
                     .cornerRadius(12)
                     .shadow(radius: 8)
                     .padding(.horizontal)
             }
 
-            // Celebrity chips
+            // Celebrity list
             if response.celebrities.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "person.crop.circle.badge.questionmark")
@@ -54,29 +56,33 @@ struct ResultView: View {
                 }
                 .padding(.top, 40)
             } else {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Tap to learn more")
-                        .font(.subheadline)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Tap for B99 effect, hold for details")
+                        .font(.caption)
                         .foregroundColor(.secondary)
                         .padding(.horizontal)
+                        .padding(.top, 16)
 
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 12) {
+                    ScrollView {
+                        VStack(spacing: 12) {
                             ForEach(response.celebrities) { celebrity in
-                                CelebrityChip(
+                                CelebrityResultRow(
                                     celebrity: celebrity,
-                                    isSelected: selectedCelebrity?.id == celebrity.id
+                                    isSelected: selectedCelebrity?.id == celebrity.id,
+                                    onTap: {
+                                        // Trigger B99 cutout effect
+                                        onCelebrityTapped(celebrity)
+                                    },
+                                    onLongPress: {
+                                        selectedCelebrity = celebrity
+                                        loadDetails(for: celebrity)
+                                    }
                                 )
-                                .onTapGesture {
-                                    selectedCelebrity = celebrity
-                                    loadDetails(for: celebrity)
-                                }
                             }
                         }
                         .padding(.horizontal)
                     }
                 }
-                .padding(.top, 20)
             }
 
             Spacer()
@@ -121,7 +127,93 @@ struct ResultView: View {
     }
 }
 
-// MARK: - Celebrity Chip
+// MARK: - Celebrity Result Row
+
+struct CelebrityResultRow: View {
+    let celebrity: CelebrityMatch
+    let isSelected: Bool
+    let onTap: () -> Void
+    let onLongPress: () -> Void
+
+    @State private var isPressed = false
+
+    var chipColor: Color {
+        Color(hex: celebrity.color) ?? .blue
+    }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            // Color indicator with icon
+            ZStack {
+                Circle()
+                    .fill(chipColor)
+                    .frame(width: 50, height: 50)
+
+                Image(systemName: "person.fill")
+                    .foregroundColor(.white)
+                    .font(.title3)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(celebrity.name)
+                    .font(.headline)
+                    .foregroundColor(.primary)
+
+                if let brief = celebrity.brief {
+                    Text(brief)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: 4) {
+                // Confidence badge
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundColor(.green)
+                        .font(.caption)
+                    Text("\(Int(celebrity.confidence * 100))%")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundColor(chipColor)
+                }
+
+                // B99 button
+                Text("B99 Style")
+                    .font(.caption2)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(chipColor.opacity(0.2))
+                    .foregroundColor(chipColor)
+                    .cornerRadius(8)
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(.systemBackground))
+                .shadow(color: isSelected ? chipColor.opacity(0.4) : Color.black.opacity(0.1), radius: isSelected ? 8 : 4)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(isSelected ? chipColor : Color.clear, lineWidth: 2)
+        )
+        .scaleEffect(isPressed ? 0.98 : 1.0)
+        .animation(.spring(response: 0.3), value: isPressed)
+        .onTapGesture {
+            onTap()
+        }
+        .onLongPressGesture(minimumDuration: 0.5, pressing: { pressing in
+            isPressed = pressing
+        }, perform: {
+            onLongPress()
+        })
+    }
+}
+
+// MARK: - Celebrity Chip (kept for potential reuse)
 
 struct CelebrityChip: View {
     let celebrity: CelebrityMatch
