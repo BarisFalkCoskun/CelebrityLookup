@@ -19,6 +19,10 @@ struct CameraLiveView: View {
     @State private var showingDetails = false
     @State private var isLoadingDetails = false
 
+    // Cutout generation state
+    @State private var isGeneratingCutout = false
+    @State private var cutoutCelebrity: FastRecognitionMatch?
+
     let recognitionInterval: TimeInterval = 1.0  // Seconds between server calls
 
     init(appState: Binding<AppState>) {
@@ -102,7 +106,7 @@ struct CameraLiveView: View {
                             Text("\(serverMatches.count) celebrity detected")
                                 .font(.headline)
                                 .foregroundColor(.white)
-                            Text("Tap on a name to see details")
+                            Text("Tap for B99 effect")
                                 .font(.caption)
                                 .foregroundColor(.white.opacity(0.7))
                         } else {
@@ -130,6 +134,12 @@ struct CameraLiveView: View {
         }
         .sheet(isPresented: $showingDetails) {
             celebrityDetailSheet
+        }
+        .overlay {
+            // Cutout loading overlay
+            if isGeneratingCutout, let celebrity = cutoutCelebrity {
+                CutoutLoadingView(celebrityName: celebrity.name, color: celebrity.uiColor)
+            }
         }
     }
 
@@ -228,6 +238,50 @@ struct CameraLiveView: View {
     // MARK: - Actions
 
     private func selectCelebrity(_ celebrity: FastRecognitionMatch) {
+        // Generate B99 cutout when celebrity is tapped
+        generateCutout(for: celebrity)
+    }
+
+    private func generateCutout(for celebrity: FastRecognitionMatch) {
+        guard let image = capturedImage else {
+            print("No captured image available for cutout")
+            return
+        }
+
+        isGeneratingCutout = true
+        cutoutCelebrity = celebrity
+
+        Task {
+            do {
+                // Use on-device cutout generation (instant, uses Neural Engine)
+                let result = try await CutoutGenerator.shared.generateCutout(
+                    from: image,
+                    faceBox: celebrity.boundingBox,
+                    color: celebrity.uiColor,
+                    name: celebrity.name
+                )
+
+                await MainActor.run {
+                    isGeneratingCutout = false
+                    cutoutCelebrity = nil
+                    // Transition to cutout presentation
+                    appState = .cutoutPresentation(
+                        result.presentation,
+                        celebrity.toCelebrityMatch(),
+                        image
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    isGeneratingCutout = false
+                    cutoutCelebrity = nil
+                    print("Failed to generate cutout: \(error)")
+                }
+            }
+        }
+    }
+
+    private func showCelebrityDetails(_ celebrity: FastRecognitionMatch) {
         selectedCelebrity = celebrity
         celebrityDetails = nil
         isLoadingDetails = true

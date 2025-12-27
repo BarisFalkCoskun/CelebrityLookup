@@ -147,23 +147,18 @@ struct ContentView: View {
 
         Task {
             do {
-                let cutoutResponse = try await APIService.shared.generateCutout(
-                    image: image,
+                // Use on-device cutout generation (instant, uses Neural Engine)
+                let result = try await CutoutGenerator.shared.generateCutout(
+                    from: image,
                     faceBox: celebrity.boundingBox,
-                    color: celebrity.color,
+                    color: celebrity.uiColor,
                     name: celebrity.name
                 )
 
-                // Decode presentation image
-                if let imageData = Data(base64Encoded: cutoutResponse.presentationImage),
-                   let presentationImage = UIImage(data: imageData) {
-                    await MainActor.run {
-                        isGeneratingCutout = false
-                        cutoutCelebrity = nil
-                        appState = .cutoutPresentation(presentationImage, celebrity, image)
-                    }
-                } else {
-                    throw APIError.invalidImage
+                await MainActor.run {
+                    isGeneratingCutout = false
+                    cutoutCelebrity = nil
+                    appState = .cutoutPresentation(result.presentation, celebrity, image)
                 }
             } catch {
                 await MainActor.run {

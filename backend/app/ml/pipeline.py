@@ -57,10 +57,14 @@ class CelebrityPipeline:
         """
         print("Initializing face recognition...")
 
-        # Initialize segmentation session (high quality for cutouts)
+        # Initialize segmentation sessions
         print("Loading segmentation model...")
-        self.seg_session = new_session("u2net_human_seg")
-        print("Segmentation model loaded.")
+        # Use birefnet-portrait for high-quality cutouts (best for portrait segmentation)
+        self.seg_session_hq = new_session("birefnet-portrait")
+        # Keep a faster model for real-time preview
+        self.seg_session_fast = new_session("u2net_human_seg")
+        self.seg_session = self.seg_session_fast  # Default to fast for backward compatibility
+        print("Segmentation models loaded.")
 
         # Load celebrity face encodings
         if celebrity_encodings_path is None:
@@ -122,14 +126,16 @@ class CelebrityPipeline:
     def _segment_person_high_quality(
         self,
         image: np.ndarray,
-        face_location: Tuple[int, int, int, int]
+        face_location: Tuple[int, int, int, int],
+        use_hq_model: bool = True
     ) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
         """
-        High-quality person segmentation with refined edges.
+        High-quality person segmentation with refined edges using BiRefNet.
 
         Args:
             image: Input image (RGB)
             face_location: Face location (top, right, bottom, left) from face_recognition
+            use_hq_model: Whether to use the high-quality BiRefNet model
 
         Returns:
             Tuple of (alpha mask 0-255, crop_box)
@@ -140,12 +146,13 @@ class CelebrityPipeline:
         # Expand bounding box to capture full person
         face_width = right - left
         face_height = bottom - top
+        face_center_x = (left + right) // 2
 
-        # Generous body region estimate
-        body_x1 = max(0, left - int(face_width * 1.5))
-        body_y1 = max(0, top - int(face_height * 0.8))
-        body_x2 = min(w, right + int(face_width * 1.5))
-        body_y2 = min(h, bottom + int(face_height * 8))  # Full body
+        # Generous body region estimate - centered on face
+        body_x1 = max(0, face_center_x - int(face_width * 2.5))
+        body_y1 = max(0, top - int(face_height * 0.5))
+        body_x2 = min(w, face_center_x + int(face_width * 2.5))
+        body_y2 = min(h, bottom + int(face_height * 6))  # Full body
 
         crop_box = (body_x1, body_y1, body_x2, body_y2)
 
@@ -153,11 +160,15 @@ class CelebrityPipeline:
         crop = image[body_y1:body_y2, body_x1:body_x2]
         pil_crop = Image.fromarray(crop)
 
-        # Get alpha mask using rembg (returns RGBA)
-        result = remove(pil_crop, session=self.seg_session, alpha_matting=True,
+        # Select model based on quality requirement
+        session = self.seg_session_hq if use_hq_model else self.seg_session_fast
+
+        # Get alpha mask using rembg with BiRefNet (returns RGBA)
+        # BiRefNet produces much cleaner edges than U2-Net
+        result = remove(pil_crop, session=session, alpha_matting=True,
                        alpha_matting_foreground_threshold=240,
                        alpha_matting_background_threshold=10,
-                       alpha_matting_erode_size=10)
+                       alpha_matting_erode_size=5)
 
         # Extract alpha channel
         result_np = np.array(result)
@@ -165,10 +176,81 @@ class CelebrityPipeline:
             alpha = result_np[:, :, 3]
         else:
             # Fallback to mask mode
-            mask_result = remove(pil_crop, session=self.seg_session, only_mask=True)
+            mask_result = remove(pil_crop, session=session, only_mask=True)
             alpha = np.array(mask_result)
 
+        # Post-process: ensure we're focusing on the person near the face
+        # If multiple people are in the crop, isolate the one closest to center
+        alpha = self._isolate_target_person(alpha, face_location, crop_box)
+
         return alpha, crop_box
+
+    def _isolate_target_person(
+        self,
+        alpha: np.ndarray,
+        face_location: Tuple[int, int, int, int],
+        crop_box: Tuple[int, int, int, int]
+    ) -> np.ndarray:
+        """
+        Isolate the target person when multiple people are detected in the mask.
+
+        Args:
+            alpha: Alpha mask from segmentation
+            face_location: Original face location in full image
+            crop_box: Crop box used for segmentation
+
+        Returns:
+            Refined alpha mask with only the target person
+        """
+        # Find connected components in the alpha mask
+        _, binary = cv2.threshold(alpha, 127, 255, cv2.THRESH_BINARY)
+
+        # Find contours
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if len(contours) <= 1:
+            return alpha  # Only one region, no need to isolate
+
+        # Calculate face center relative to crop
+        top, right, bottom, left = face_location
+        crop_x1, crop_y1, crop_x2, crop_y2 = crop_box
+
+        face_center_x = ((left + right) // 2) - crop_x1
+        face_center_y = ((top + bottom) // 2) - crop_y1
+
+        # Find the contour that contains or is closest to the face center
+        best_contour = None
+        best_score = float('inf')
+
+        for contour in contours:
+            # Check if face center is inside this contour
+            result = cv2.pointPolygonTest(contour, (face_center_x, face_center_y), True)
+
+            if result >= 0:
+                # Face is inside this contour - use it
+                best_contour = contour
+                break
+
+            # Otherwise, find distance to contour centroid
+            M = cv2.moments(contour)
+            if M["m00"] > 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                dist = np.sqrt((cx - face_center_x)**2 + (cy - face_center_y)**2)
+
+                if dist < best_score:
+                    best_score = dist
+                    best_contour = contour
+
+        if best_contour is None:
+            return alpha
+
+        # Create a new mask with only the target person
+        isolated_mask = np.zeros_like(alpha)
+        cv2.drawContours(isolated_mask, [best_contour], -1, 255, -1)
+
+        # Apply the isolated mask to the original alpha
+        return cv2.bitwise_and(alpha, isolated_mask)
 
     def _segment_person(
         self,

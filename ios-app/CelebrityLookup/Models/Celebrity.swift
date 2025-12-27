@@ -71,6 +71,18 @@ struct FastRecognitionMatch: Codable, Identifiable {
     var uiColor: UIColor {
         UIColor(hex: color) ?? .systemBlue
     }
+
+    /// Convert to CelebrityMatch for use with CutoutPresentationView
+    func toCelebrityMatch() -> CelebrityMatch {
+        CelebrityMatch(
+            id: celebrityId,
+            name: name,
+            confidence: confidence,
+            color: color,
+            boundingBox: boundingBox,
+            brief: nil
+        )
+    }
 }
 
 struct FastRecognitionResponse: Codable {
